@@ -1,0 +1,146 @@
+name: Quanten-Imperium APK bauen
+
+# Startet automatisch bei jedem Hochladen (Push) und manuell über "Run workflow".
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dateien holen
+        uses: actions/checkout@v4
+
+      - name: Node.js einrichten
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Java 21 einrichten
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Android SDK einrichten
+        uses: android-actions/setup-android@v3
+
+      - name: Capacitor-Projekt erzeugen
+        run: |
+          mkdir -p www
+          cp index.html www/index.html
+          cat > package.json <<'EOF'
+          {
+            "name": "quanten-imperium",
+            "version": "1.0.0",
+            "private": true,
+            "dependencies": {
+              "@capacitor/android": "^7.0.0",
+              "@capacitor/app": "^7.0.0",
+              "@capacitor/core": "^7.0.0"
+            },
+            "devDependencies": {
+              "@capacitor/assets": "^3.0.5",
+              "@capacitor/cli": "^7.0.0",
+              "sharp": "^0.33.5"
+            }
+          }
+          EOF
+          cat > capacitor.config.json <<'EOF'
+          {
+            "appId": "de.quantenimperium.game",
+            "appName": "Quanten-Imperium",
+            "webDir": "www",
+            "backgroundColor": "#0B0F19",
+            "android": {
+              "backgroundColor": "#0B0F19",
+              "adjustMarginsForEdgeToEdge": "force"
+            }
+          }
+          EOF
+          npm install
+
+      - name: App-Icon und Startbild zeichnen
+        run: |
+          cat > make-icons.mjs <<'EOF'
+          import sharp from 'sharp';
+          import fs from 'fs';
+          fs.mkdirSync('assets', { recursive: true });
+          const core = (s) => `
+            <defs>
+              <radialGradient id="g" cx="40%" cy="35%" r="65%">
+                <stop offset="0" stop-color="#ffffff"/>
+                <stop offset="0.22" stop-color="#00F3FF"/>
+                <stop offset="0.6" stop-color="#035a66"/>
+                <stop offset="1" stop-color="#05070d"/>
+              </radialGradient>
+              <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+                <stop offset="0.45" stop-color="#00F3FF" stop-opacity="0.55"/>
+                <stop offset="1" stop-color="#00F3FF" stop-opacity="0"/>
+              </radialGradient>
+            </defs>
+            <g transform="translate(512 512) scale(${s})">
+              <circle r="330" fill="url(#glow)"/>
+              <circle r="290" fill="none" stroke="#00F3FF" stroke-width="6" stroke-dasharray="18 14" opacity="0.6"/>
+              <circle r="245" fill="none" stroke="#FF007F" stroke-width="12" stroke-dasharray="380 390" opacity="0.9"/>
+              <circle r="200" fill="url(#g)"/>
+              <rect x="-18" y="-310" width="36" height="36" rx="8" fill="#FF007F" transform="rotate(45 0 -292)"/>
+              <rect x="-18" y="274" width="36" height="36" rx="8" fill="#FF007F" transform="rotate(45 0 292)"/>
+              <rect x="274" y="-18" width="36" height="36" rx="8" fill="#00FF66" transform="rotate(45 292 0)"/>
+              <rect x="-310" y="-18" width="36" height="36" rx="8" fill="#00FF66" transform="rotate(45 -292 0)"/>
+            </g>`;
+          const svg = (w, h, inner) => `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${inner}</svg>`;
+          const bg = (w, h) => `<rect width="${w}" height="${h}" fill="#0B0F19"/>`;
+          await sharp(Buffer.from(svg(1024, 1024, bg(1024, 1024) + core(1.35)))).png().toFile('assets/icon-only.png');
+          await sharp(Buffer.from(svg(1024, 1024, core(0.95)))).png().toFile('assets/icon-foreground.png');
+          await sharp(Buffer.from(svg(1024, 1024, bg(1024, 1024)))).png().toFile('assets/icon-background.png');
+          const splash = svg(2732, 2732, bg(2732, 2732) + `<g transform="translate(854 854)">${core(1.6)}</g>` +
+            `<text x="1366" y="2050" text-anchor="middle" font-family="sans-serif" font-weight="800" font-size="120" letter-spacing="24" fill="#00F3FF">QUANTEN-IMPERIUM</text>`);
+          await sharp(Buffer.from(splash)).png().toFile('assets/splash.png');
+          fs.copyFileSync('assets/splash.png', 'assets/splash-dark.png');
+          console.log('Icons erstellt:', fs.readdirSync('assets'));
+          EOF
+          node make-icons.mjs
+
+      - name: Android-Projekt anlegen
+        run: npx cap add android
+
+      - name: Icons in Android einbauen
+        run: |
+          npx capacitor-assets generate --android --iconBackgroundColor '#0B0F19' --iconBackgroundColorDark '#0B0F19' --splashBackgroundColor '#0B0F19' --splashBackgroundColorDark '#0B0F19' || echo "Hinweis - Icon-Erzeugung übersprungen, Standard-Icon wird verwendet."
+
+      - name: Android-Einstellungen (Hochformat, Vibration)
+        run: |
+          M=android/app/src/main/AndroidManifest.xml
+          sed -i '0,/<activity/s//<activity android:screenOrientation="portrait"/' "$M"
+          grep -q 'android.permission.VIBRATE' "$M" || sed -i 's#</manifest>#    <uses-permission android:name="android.permission.VIBRATE" />\n</manifest>#' "$M"
+          cat "$M"
+
+      - name: Spiel in die App kopieren
+        run: npx cap sync android
+
+      - name: APK kompilieren
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk ../Quanten-Imperium.apk
+
+      - name: APK als Download speichern
+        uses: actions/upload-artifact@v4
+        with:
+          name: Quanten-Imperium-APK
+          path: Quanten-Imperium.apk
+
+      - name: APK als Release veröffentlichen (direkter Handy-Download)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v1.0.${{ github.run_number }}" Quanten-Imperium.apk \
+            --title "Quanten-Imperium v1.0.${{ github.run_number }}" \
+            --notes "Automatisch gebaute APK. Auf dem Handy herunterladen, öffnen und installieren (Installation aus unbekannten Quellen erlauben)."
